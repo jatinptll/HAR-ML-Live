@@ -122,7 +122,7 @@ st.markdown("""
     border: 1px solid #1e2a4a;
     border-radius: 12px;
     padding: 1.1rem;
-    margin: 1rem 0;
+    margin: 1rem 0 1rem 0.85rem;
   }
 
   .risk-title {
@@ -161,6 +161,10 @@ st.markdown("""
   }
 
   @media (max-width: 760px) {
+    .risk-card {
+      margin-left: 0;
+    }
+
     .risk-metrics {
       grid-template-columns: 1fr;
     }
