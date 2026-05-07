@@ -254,6 +254,7 @@ st.markdown("""
   /* --- Hide Streamlit branding --- */
   #MainMenu, footer, header { visibility: hidden; }
   .block-container { padding-top: 2rem; }
+  .stale-element { opacity: 1 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -337,6 +338,9 @@ model_dataset = artifact.get("dataset", "UCI HAR Dataset")
 model_feature_names = artifact.get("feature_names", [])
 model_training_source = artifact.get("training_source", "actual UCI HAR dataset")
 
+if hasattr(model, "n_jobs"):
+    model.n_jobs = 1
+
 # ── Feature engineering ───────────────────────────────────────────────────────
 def build_features(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion=None):
     """Build the full 561-feature vector used by the UCI HAR-trained model."""
@@ -350,11 +354,30 @@ def predict_activity(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion=None):
     """Return predicted activity and probability distribution."""
     features = build_features(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion)
     features_scaled = scaler.transform(features)
-    
-    pred_idx = model.predict(features_scaled)[0]
+
     probs = model.predict_proba(features_scaled)[0]
+    pred_idx = int(np.argmax(probs))
     
     return ACTIVITIES[pred_idx], probs
+
+
+def get_cached_live_prediction(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion):
+    """
+    Avoid re-running the 561-feature extractor and 500-tree forest on every page tick.
+    Live sensors can post several updates per second, but human activity labels do not
+    need sub-second inference to feel responsive.
+    """
+    now = time.time()
+    last_at = st.session_state.get("last_live_prediction_at", 0.0)
+    cached = st.session_state.get("last_live_prediction")
+
+    if cached and now - last_at < 1.6:
+        return cached
+
+    predicted, probs = predict_activity(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion)
+    st.session_state["last_live_prediction_at"] = now
+    st.session_state["last_live_prediction"] = (predicted, probs)
+    return predicted, probs
 
 
 def render_motion_metrics(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z):
@@ -713,15 +736,18 @@ with right_col:
     st.markdown('<div class="section-header">🎯 Prediction</div>', unsafe_allow_html=True)
     
     # Run prediction
-    predicted, probs = predict_activity(
-        acc_x,
-        acc_y,
-        acc_z,
-        gyro_x,
-        gyro_y,
-        gyro_z,
-        live_motion if is_live_mode else None,
-    )
+    if is_live_mode:
+        predicted, probs = get_cached_live_prediction(
+            acc_x,
+            acc_y,
+            acc_z,
+            gyro_x,
+            gyro_y,
+            gyro_z,
+            live_motion,
+        )
+    else:
+        predicted, probs = predict_activity(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, None)
     confidence = max(probs) * 100
     icon = ACTIVITY_ICONS[predicted]
     color = ACTIVITY_COLORS[predicted]
