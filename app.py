@@ -327,29 +327,71 @@ artifact = load_model()
 model = artifact["model"]
 scaler = artifact["scaler"]
 model_accuracy = artifact["accuracy"]
+model_dataset = artifact.get("dataset", "UCI HAR Dataset")
+model_feature_names = artifact.get("feature_names", [])
+model_training_source = artifact.get("training_source", "actual UCI HAR dataset")
 
 # ── Feature engineering ───────────────────────────────────────────────────────
-def build_features(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z):
-    """Build 561-dimensional feature vector from 6 core sensor inputs."""
-    core = np.array([acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z])
-    
+def build_features(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion=None):
+    """Build the compact feature vector used by the real UCI HAR-trained model."""
     acc_mag = np.sqrt(acc_x**2 + acc_y**2 + acc_z**2)
     gyro_mag = np.sqrt(gyro_x**2 + gyro_y**2 + gyro_z**2)
-    
-    # Reproduce the same synthetic feature expansion as training
-    np.random.seed(int(abs(acc_x * 1000 + acc_y * 100 + acc_z * 10) % 999))
-    extra = np.random.randn(553) * 0.1
-    
-    # Add activity-specific signal to extra features  
-    signal = np.array([acc_x, acc_y, acc_z] * 90 + [gyro_x, gyro_y, gyro_z] * 90 + [0] * 13)
-    extra += signal
-    
-    return np.hstack([core, [acc_mag, gyro_mag], extra]).reshape(1, -1)
+
+    if motion:
+        acc_x_std = safe_float(motion.get("acc_x_std"), 0)
+        acc_y_std = safe_float(motion.get("acc_y_std"), 0)
+        acc_z_std = safe_float(motion.get("acc_z_std"), 0)
+        gyro_x_std = safe_float(motion.get("gyro_x_std"), 0)
+        gyro_y_std = safe_float(motion.get("gyro_y_std"), 0)
+        gyro_z_std = safe_float(motion.get("gyro_z_std"), 0)
+        acc_rms = safe_float(motion.get("acc_rms_g"), acc_mag)
+        gyro_rms = safe_float(motion.get("gyro_rms"), gyro_mag)
+        peak_body = safe_float(motion.get("peak_body_g"), acc_mag)
+        peak_jerk = safe_float(motion.get("peak_jerk_gs"), 0)
+        stillness = safe_float(motion.get("stillness_score"), 0)
+    else:
+        dynamic_scale = 0.18 if acc_mag > 0.15 or gyro_mag > 0.08 else 0.03
+        acc_x_std = abs(acc_x) * dynamic_scale
+        acc_y_std = abs(acc_y) * dynamic_scale
+        acc_z_std = abs(acc_z) * dynamic_scale
+        gyro_x_std = abs(gyro_x) * dynamic_scale
+        gyro_y_std = abs(gyro_y) * dynamic_scale
+        gyro_z_std = abs(gyro_z) * dynamic_scale
+        acc_rms = acc_mag
+        gyro_rms = gyro_mag
+        peak_body = acc_mag
+        peak_jerk = 0.0
+        stillness = 1.0 if acc_mag < 0.14 and gyro_mag < 0.18 else 0.0
+
+    features = np.array(
+        [
+            acc_x,
+            acc_y,
+            acc_z,
+            gyro_x,
+            gyro_y,
+            gyro_z,
+            acc_x_std,
+            acc_y_std,
+            acc_z_std,
+            gyro_x_std,
+            gyro_y_std,
+            gyro_z_std,
+            acc_rms,
+            gyro_rms,
+            peak_body,
+            peak_jerk,
+            clamp(stillness, 0, 1),
+        ],
+        dtype=float,
+    )
+
+    return features.reshape(1, -1)
 
 
-def predict_activity(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z):
+def predict_activity(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion=None):
     """Return predicted activity and probability distribution."""
-    features = build_features(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z)
+    features = build_features(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion)
     features_scaled = scaler.transform(features)
     
     pred_idx = model.predict(features_scaled)[0]
@@ -430,6 +472,12 @@ def normalize_live_payload(payload):
         "gyro_x": clamp(safe_float(payload.get("gyro_x"), 0), -2.0, 2.0),
         "gyro_y": clamp(safe_float(payload.get("gyro_y"), 0), -2.0, 2.0),
         "gyro_z": clamp(safe_float(payload.get("gyro_z"), 0), -2.0, 2.0),
+        "acc_x_std": safe_float(payload.get("acc_x_std"), 0),
+        "acc_y_std": safe_float(payload.get("acc_y_std"), 0),
+        "acc_z_std": safe_float(payload.get("acc_z_std"), 0),
+        "gyro_x_std": safe_float(payload.get("gyro_x_std"), 0),
+        "gyro_y_std": safe_float(payload.get("gyro_y_std"), 0),
+        "gyro_z_std": safe_float(payload.get("gyro_z_std"), 0),
         "acc_rms_g": safe_float(payload.get("acc_rms_g"), 0),
         "gyro_rms": safe_float(payload.get("gyro_rms"), 0),
         "peak_body_g": safe_float(payload.get("peak_body_g"), 0),
@@ -582,9 +630,9 @@ with st.sidebar:
     
     st.markdown("""
     <div style="font-size:0.75rem; color:#4a5580; margin-top:1rem; line-height:1.6">
-        <b style="color:#6b7db3">Dataset:</b> UCI HAR (synthetic)<br>
-        <b style="color:#6b7db3">Model:</b> Random Forest (150 trees)<br>
-        <b style="color:#6b7db3">Features:</b> 561 sensor features<br>
+        <b style="color:#6b7db3">Dataset:</b> Actual UCI HAR<br>
+        <b style="color:#6b7db3">Model:</b> Random Forest<br>
+        <b style="color:#6b7db3">Features:</b> {len(model_feature_names) or 17} live-compatible features<br>
         <b style="color:#6b7db3">Classes:</b> 6 activities<br>
         <b style="color:#6b7db3">Sensor:</b> Smartphone IMU<br>
         <b style="color:#6b7db3">Safety Layer:</b> Impact + jerk + stillness
@@ -693,7 +741,15 @@ with right_col:
     st.markdown('<div class="section-header">🎯 Prediction</div>', unsafe_allow_html=True)
     
     # Run prediction
-    predicted, probs = predict_activity(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z)
+    predicted, probs = predict_activity(
+        acc_x,
+        acc_y,
+        acc_z,
+        gyro_x,
+        gyro_y,
+        gyro_z,
+        live_motion if is_live_mode else None,
+    )
     confidence = max(probs) * 100
     icon = ACTIVITY_ICONS[predicted]
     color = ACTIVITY_COLORS[predicted]
@@ -905,7 +961,7 @@ st.plotly_chart(fig_imp, width="stretch", config={"displayModeBar": False})
 st.markdown("""
 <div style="text-align:center; margin-top:3rem; padding:1.5rem; border-top:1px solid #1e2a4a">
   <span style="font-family:'Space Mono',monospace; font-size:0.7rem; color:#2a3560; letter-spacing:3px">
-    LIVE PHONE SENSOR · FALL DETECTION · RANDOM FOREST CLASSIFIER · 561 SENSOR FEATURES
+    ACTUAL UCI HAR DATASET · LIVE PHONE SENSOR · FALL DETECTION · RANDOM FOREST CLASSIFIER
   </span>
 </div>
 """, unsafe_allow_html=True)

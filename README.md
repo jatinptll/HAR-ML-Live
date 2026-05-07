@@ -91,8 +91,9 @@ Activity prediction + fall detection
 
 ## Machine Learning Pipeline
 
-1. Generate synthetic UCI HAR-like sensor data.
-2. Build a 561-dimensional feature vector.
+1. Download the actual UCI HAR Dataset.
+2. Load the raw 128-sample inertial signal windows.
+3. Extract live-compatible window features from real accelerometer and gyroscope signals.
 3. Split data into training and testing sets.
 4. Scale features using `StandardScaler`.
 5. Train a `RandomForestClassifier`.
@@ -103,7 +104,7 @@ Activity prediction + fall detection
 
 ## Model Details
 
-The current model is a Random Forest classifier trained on synthetic UCI HAR-like data.
+The current model is a Random Forest classifier trained on the actual UCI HAR Dataset.
 
 The model input starts from six core sensor channels:
 
@@ -111,12 +112,15 @@ The model input starts from six core sensor channels:
 acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z
 ```
 
-The app expands these into a 561-feature vector using:
+The app expands these into the same compact feature schema used during training:
 
 - Core accelerometer and gyroscope values
+- Rolling standard deviation for each sensor axis
 - Acceleration magnitude
 - Gyroscope magnitude
-- Additional synthetic engineered features
+- Body acceleration peak
+- Jerk peak
+- Stillness score
 
 The model predicts one of six human activity classes.
 
@@ -165,7 +169,7 @@ If `model.pkl` already exists, this step is optional.
 python train_model.py
 ```
 
-This generates synthetic HAR-like data, trains the Random Forest model, and saves the model artifact.
+This downloads the actual UCI HAR Dataset, extracts raw inertial-window features, trains the Random Forest model, and saves the model artifact.
 
 ## Run the Streamlit App
 
@@ -239,7 +243,7 @@ plotly>=5.18.0
 
 ## Limitations
 
-- The current model is trained on synthetic UCI HAR-like data.
+- The current model is trained on the actual UCI HAR Dataset, but uses compact live-compatible features rather than the full official 561-feature set.
 - Real-world accuracy depends on phone placement and sensor quality.
 - Fall detection is rule-based and not trained on a dedicated fall dataset.
 - Browser sensor permissions vary across devices and browsers.
@@ -261,4 +265,3 @@ plotly>=5.18.0
 ```text
 https://github.com/jatinptll/HAR-ML-Live
 ```
-

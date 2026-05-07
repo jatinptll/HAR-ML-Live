@@ -11,6 +11,9 @@ env/
 # Runtime sensor data
 phone_motion_latest.json
 
+# Downloaded datasets
+data/
+
 # Streamlit/runtime cache
 .streamlit/secrets.toml
 

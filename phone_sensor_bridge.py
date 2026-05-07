@@ -245,6 +245,13 @@ COLLECTOR_HTML = """<!doctype html>
       return values.reduce((sum, item) => sum + item[key], 0) / values.length;
     }
 
+    function std(values, key) {
+      if (!values.length) return 0;
+      const avg = mean(values, key);
+      const variance = values.reduce((sum, item) => sum + Math.pow(item[key] - avg, 2), 0) / values.length;
+      return Math.sqrt(variance);
+    }
+
     function max(values, key) {
       if (!values.length) return 0;
       return values.reduce((current, item) => Math.max(current, item[key]), 0);
@@ -301,6 +308,12 @@ COLLECTOR_HTML = """<!doctype html>
         gyro_x: clamp(mean(buffer, "gyroX"), -2, 2),
         gyro_y: clamp(mean(buffer, "gyroY"), -2, 2),
         gyro_z: clamp(mean(buffer, "gyroZ"), -2, 2),
+        acc_x_std: std(buffer, "bodyX"),
+        acc_y_std: std(buffer, "bodyY"),
+        acc_z_std: std(buffer, "bodyZ"),
+        gyro_x_std: std(buffer, "gyroX"),
+        gyro_y_std: std(buffer, "gyroY"),
+        gyro_z_std: std(buffer, "gyroZ"),
         acc_rms_g: Math.sqrt(mean(buffer, "bodyMagSq")),
         gyro_rms: Math.sqrt(mean(buffer, "gyroMagSq")),
         peak_body_g: windowBodyPeak,
