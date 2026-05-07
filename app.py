@@ -1,4 +1,5 @@
 import streamlit as st
+import joblib
 import numpy as np
 import pickle
 import plotly.graph_objects as go
@@ -10,6 +11,8 @@ import sys
 import time
 import warnings
 import streamlit.components.v1 as components
+
+from har_features import BASE_AXES, FEATURE_COUNT, WINDOW_SIZE, extract_window_features, window_from_motion
 
 warnings.filterwarnings(
     "ignore",
@@ -320,8 +323,11 @@ def load_model():
         # Auto-train if model not found
         import train_model
         train_model.train_and_save()
-    with open(model_path, "rb") as f:
-        return pickle.load(f)
+    try:
+        return joblib.load(model_path)
+    except Exception:
+        with open(model_path, "rb") as f:
+            return pickle.load(f)
 
 artifact = load_model()
 model = artifact["model"]
@@ -333,59 +339,10 @@ model_training_source = artifact.get("training_source", "actual UCI HAR dataset"
 
 # ── Feature engineering ───────────────────────────────────────────────────────
 def build_features(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion=None):
-    """Build the compact feature vector used by the real UCI HAR-trained model."""
-    acc_mag = np.sqrt(acc_x**2 + acc_y**2 + acc_z**2)
-    gyro_mag = np.sqrt(gyro_x**2 + gyro_y**2 + gyro_z**2)
-
-    if motion:
-        acc_x_std = safe_float(motion.get("acc_x_std"), 0)
-        acc_y_std = safe_float(motion.get("acc_y_std"), 0)
-        acc_z_std = safe_float(motion.get("acc_z_std"), 0)
-        gyro_x_std = safe_float(motion.get("gyro_x_std"), 0)
-        gyro_y_std = safe_float(motion.get("gyro_y_std"), 0)
-        gyro_z_std = safe_float(motion.get("gyro_z_std"), 0)
-        acc_rms = safe_float(motion.get("acc_rms_g"), acc_mag)
-        gyro_rms = safe_float(motion.get("gyro_rms"), gyro_mag)
-        peak_body = safe_float(motion.get("peak_body_g"), acc_mag)
-        peak_jerk = safe_float(motion.get("peak_jerk_gs"), 0)
-        stillness = safe_float(motion.get("stillness_score"), 0)
-    else:
-        dynamic_scale = 0.18 if acc_mag > 0.15 or gyro_mag > 0.08 else 0.03
-        acc_x_std = abs(acc_x) * dynamic_scale
-        acc_y_std = abs(acc_y) * dynamic_scale
-        acc_z_std = abs(acc_z) * dynamic_scale
-        gyro_x_std = abs(gyro_x) * dynamic_scale
-        gyro_y_std = abs(gyro_y) * dynamic_scale
-        gyro_z_std = abs(gyro_z) * dynamic_scale
-        acc_rms = acc_mag
-        gyro_rms = gyro_mag
-        peak_body = acc_mag
-        peak_jerk = 0.0
-        stillness = 1.0 if acc_mag < 0.14 and gyro_mag < 0.18 else 0.0
-
-    features = np.array(
-        [
-            acc_x,
-            acc_y,
-            acc_z,
-            gyro_x,
-            gyro_y,
-            gyro_z,
-            acc_x_std,
-            acc_y_std,
-            acc_z_std,
-            gyro_x_std,
-            gyro_y_std,
-            gyro_z_std,
-            acc_rms,
-            gyro_rms,
-            peak_body,
-            peak_jerk,
-            clamp(stillness, 0, 1),
-        ],
-        dtype=float,
-    )
-
+    """Build the full 561-feature vector used by the UCI HAR-trained model."""
+    fallback_values = (acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z)
+    window = window_from_motion(motion or {}, fallback_values)
+    features = extract_window_features(window)
     return features.reshape(1, -1)
 
 
@@ -445,6 +402,15 @@ def clamp(value, lower, upper):
     return max(lower, min(upper, value))
 
 
+def normalize_axis_window(values):
+    if not isinstance(values, list):
+        return []
+    clean = []
+    for value in values[-WINDOW_SIZE:]:
+        clean.append(safe_float(value, 0.0))
+    return clean
+
+
 def get_lan_ip():
     """Best-effort IP that phones on the same hotspot can try opening."""
     try:
@@ -461,6 +427,11 @@ def get_lan_ip():
 def normalize_live_payload(payload):
     """Convert the browser motion payload into model-ready sensor values."""
     payload = payload or {}
+    raw_window = payload.get("window")
+    window = {}
+    if isinstance(raw_window, dict):
+        window = {axis: normalize_axis_window(raw_window.get(axis)) for axis in BASE_AXES}
+
     return {
         "running": bool(payload.get("running", False)),
         "error": payload.get("error"),
@@ -487,6 +458,7 @@ def normalize_live_payload(payload):
         "seconds_since_impact": payload.get("seconds_since_impact"),
         "received_at": payload.get("received_at"),
         "source": payload.get("source", "streamlit_component"),
+        "window": window,
     }
 
 
@@ -628,11 +600,11 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
     
-    st.markdown("""
+    st.markdown(f"""
     <div style="font-size:0.75rem; color:#4a5580; margin-top:1rem; line-height:1.6">
         <b style="color:#6b7db3">Dataset:</b> Actual UCI HAR<br>
-        <b style="color:#6b7db3">Model:</b> Random Forest<br>
-        <b style="color:#6b7db3">Features:</b> {len(model_feature_names) or 17} live-compatible features<br>
+        <b style="color:#6b7db3">Model:</b> Random Forest ({artifact.get("n_estimators", "many")} trees)<br>
+        <b style="color:#6b7db3">Features:</b> {len(model_feature_names) or FEATURE_COUNT} rolling-window features<br>
         <b style="color:#6b7db3">Classes:</b> 6 activities<br>
         <b style="color:#6b7db3">Sensor:</b> Smartphone IMU<br>
         <b style="color:#6b7db3">Safety Layer:</b> Impact + jerk + stillness
@@ -916,12 +888,13 @@ with heatmap_col:
 
 
 # ── Feature importance insight ─────────────────────────────────────────────────
-st.markdown('<div class="section-header">🔬 Model Feature Importance (Top 6 Sensor Channels)</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-header">🔬 Model Feature Importance (Top 6 Window Features)</div>', unsafe_allow_html=True)
 
-importance = model.feature_importances_[:6]
-feat_names = ["Body Acc X", "Body Acc Y", "Body Acc Z", "Gyro X", "Gyro Y", "Gyro Z"]
-importance_pct = importance / importance.sum() * 100
-sorted_feat = sorted(zip(feat_names, importance_pct), key=lambda x: x[1], reverse=True)
+importance = np.asarray(model.feature_importances_)
+top_idx = np.argsort(importance)[-6:][::-1]
+feat_names = [model_feature_names[i].replace("_", " ").title() for i in top_idx]
+importance_pct = importance[top_idx] / max(importance.sum(), 1e-9) * 100
+sorted_feat = list(zip(feat_names, importance_pct))
 
 fig_imp = go.Figure()
 for feat, imp in sorted_feat:

@@ -257,6 +257,10 @@ COLLECTOR_HTML = """<!doctype html>
       return values.reduce((current, item) => Math.max(current, item[key]), 0);
     }
 
+    function series(values, key, limit = 128) {
+      return values.slice(-limit).map((item) => item[key] || 0);
+    }
+
     function render(payload) {
       els.samples.textContent = String(payload.samples);
       els.rate.textContent = `${payload.sample_rate_hz.toFixed(0)} Hz`;
@@ -324,6 +328,14 @@ COLLECTOR_HTML = """<!doctype html>
         session_peak_jerk_gs: peakSinceReset.jerk,
         stillness_score: stillness,
         seconds_since_impact: latestImpact ? (now - latestImpact.t) / 1000 : null,
+        window: {
+          acc_x: series(buffer, "bodyX"),
+          acc_y: series(buffer, "bodyY"),
+          acc_z: series(buffer, "bodyZ"),
+          gyro_x: series(buffer, "gyroX"),
+          gyro_y: series(buffer, "gyroY"),
+          gyro_z: series(buffer, "gyroZ"),
+        },
       };
 
       render(payload);

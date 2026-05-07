@@ -93,13 +93,12 @@ Activity prediction + fall detection
 
 1. Download the actual UCI HAR Dataset.
 2. Load the raw 128-sample inertial signal windows.
-3. Extract live-compatible window features from real accelerometer and gyroscope signals.
-3. Split data into training and testing sets.
+3. Extract 561 rolling-window features from real accelerometer and gyroscope signals.
 4. Scale features using `StandardScaler`.
-5. Train a `RandomForestClassifier`.
-6. Save the trained model, scaler, and accuracy in `model.pkl`.
+5. Train a 500-tree `RandomForestClassifier`.
+6. Save the trained model, scaler, feature names, and accuracy in `model.pkl`.
 7. Load the saved model inside the Streamlit app.
-8. Convert live or manual sensor readings into the same feature format.
+8. Convert live phone sensor windows into the same 561-feature format.
 9. Predict the current activity and display class probabilities.
 
 ## Model Details
@@ -112,15 +111,13 @@ The model input starts from six core sensor channels:
 acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z
 ```
 
-The app expands these into the same compact feature schema used during training:
+The app expands a rolling 128-sample phone window into the same 561-feature schema used during training:
 
-- Core accelerometer and gyroscope values
-- Rolling standard deviation for each sensor axis
-- Acceleration magnitude
-- Gyroscope magnitude
-- Body acceleration peak
-- Jerk peak
-- Stillness score
+- Time-domain statistics for accelerometer and gyroscope axes
+- Magnitude and jerk features
+- Correlation features between axes
+- Frequency-domain FFT features
+- Stillness, dynamic movement, and impact-style window features
 
 The model predicts one of six human activity classes.
 
@@ -169,7 +166,7 @@ If `model.pkl` already exists, this step is optional.
 python train_model.py
 ```
 
-This downloads the actual UCI HAR Dataset, extracts raw inertial-window features, trains the Random Forest model, and saves the model artifact.
+This downloads the actual UCI HAR Dataset, extracts 561 raw inertial-window features, trains the 500-tree Random Forest model, and saves the compressed model artifact.
 
 ## Run the Streamlit App
 
@@ -243,7 +240,7 @@ plotly>=5.18.0
 
 ## Limitations
 
-- The current model is trained on the actual UCI HAR Dataset, but uses compact live-compatible features rather than the full official 561-feature set.
+- The current model is trained on the actual UCI HAR Dataset using a 561-feature rolling-window pipeline.
 - Real-world accuracy depends on phone placement and sensor quality.
 - Fall detection is rule-based and not trained on a dedicated fall dataset.
 - Browser sensor permissions vary across devices and browsers.
