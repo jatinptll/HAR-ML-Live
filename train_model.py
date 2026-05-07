@@ -1,10 +1,9 @@
 """
-Train the HAR classifier on the actual UCI HAR raw inertial windows.
+Train the HAR classifier on actual UCI HAR raw inertial windows.
 
-This version uses the full 128-sample accelerometer and gyroscope windows to
-build a 561-feature vector for every UCI HAR example. The live phone collector
-sends the same rolling window shape, so the trained model sees richer motion
-patterns than simple mean/std summaries.
+This model intentionally uses only the compact features that the live phone
+collector sends to Streamlit. That keeps live prediction fast while still using
+the real UCI HAR dataset rather than synthetic data.
 """
 
 from pathlib import Path
@@ -18,8 +17,6 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import StandardScaler
 
-from har_features import FEATURE_COUNT, SAMPLE_RATE_HZ, extract_feature_matrix, get_feature_names
-
 
 DATASET_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/00240/UCI%20HAR%20Dataset.zip"
 BASE_DIR = Path(__file__).resolve().parent
@@ -27,6 +24,7 @@ DATA_DIR = BASE_DIR / "data"
 ZIP_PATH = DATA_DIR / "UCI_HAR_Dataset.zip"
 EXTRACTED_DIR = DATA_DIR / "UCI HAR Dataset"
 MODEL_PATH = BASE_DIR / "model.pkl"
+SAMPLE_RATE_HZ = 50.0
 N_ESTIMATORS = 500
 
 ACTIVITIES = [
@@ -36,6 +34,27 @@ ACTIVITIES = [
     "Sitting",
     "Standing",
     "Laying",
+]
+
+FEATURE_NAMES = [
+    "acc_x",
+    "acc_y",
+    "acc_z",
+    "gyro_x",
+    "gyro_y",
+    "gyro_z",
+    "acc_x_std",
+    "acc_y_std",
+    "acc_z_std",
+    "gyro_x_std",
+    "gyro_y_std",
+    "gyro_z_std",
+    "acc_rms_g",
+    "gyro_rms",
+    "peak_body_g",
+    "peak_total_g",
+    "peak_jerk_gs",
+    "stillness_score",
 ]
 
 
@@ -63,39 +82,55 @@ def load_labels(split):
     return np.loadtxt(path, dtype=int) - 1
 
 
-def load_uci_windows(split):
+def build_live_feature_matrix(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z):
+    """Build the same compact feature schema emitted by the phone collector."""
+    acc_mag = np.sqrt(acc_x**2 + acc_y**2 + acc_z**2)
+    gyro_mag = np.sqrt(gyro_x**2 + gyro_y**2 + gyro_z**2)
+    acc_jerk = np.abs(np.diff(acc_mag, axis=1, prepend=acc_mag[:, :1])) * SAMPLE_RATE_HZ
+    total_mag = np.sqrt((acc_x + 0.0) ** 2 + (acc_y + 0.0) ** 2 + (acc_z + 1.0) ** 2)
+    stillness = np.mean((acc_mag < 0.14) & (gyro_mag < 0.18), axis=1)
+
+    return np.column_stack(
+        [
+            acc_x.mean(axis=1),
+            acc_y.mean(axis=1),
+            acc_z.mean(axis=1),
+            gyro_x.mean(axis=1),
+            gyro_y.mean(axis=1),
+            gyro_z.mean(axis=1),
+            acc_x.std(axis=1),
+            acc_y.std(axis=1),
+            acc_z.std(axis=1),
+            gyro_x.std(axis=1),
+            gyro_y.std(axis=1),
+            gyro_z.std(axis=1),
+            np.sqrt(np.mean(acc_mag**2, axis=1)),
+            np.sqrt(np.mean(gyro_mag**2, axis=1)),
+            acc_mag.max(axis=1),
+            total_mag.max(axis=1),
+            acc_jerk.max(axis=1),
+            stillness,
+        ]
+    )
+
+
+def load_uci_har_split(split):
     acc_x = load_signal(split, "body_acc_x")
     acc_y = load_signal(split, "body_acc_y")
     acc_z = load_signal(split, "body_acc_z")
     gyro_x = load_signal(split, "body_gyro_x")
     gyro_y = load_signal(split, "body_gyro_y")
     gyro_z = load_signal(split, "body_gyro_z")
+    labels = load_labels(split)
 
-    windows = []
-    for index in range(acc_x.shape[0]):
-        windows.append(
-            {
-                "acc_x": acc_x[index],
-                "acc_y": acc_y[index],
-                "acc_z": acc_z[index],
-                "gyro_x": gyro_x[index],
-                "gyro_y": gyro_y[index],
-                "gyro_z": gyro_z[index],
-            }
-        )
-    return windows, load_labels(split)
+    features = build_live_feature_matrix(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z)
+    return features, labels
 
 
 def load_uci_har_data():
     download_dataset()
-    train_windows, y_train = load_uci_windows("train")
-    test_windows, y_test = load_uci_windows("test")
-
-    print(f"Extracting {FEATURE_COUNT} features from train windows...")
-    X_train = extract_feature_matrix(train_windows)
-    print(f"Extracting {FEATURE_COUNT} features from test windows...")
-    X_test = extract_feature_matrix(test_windows)
-
+    X_train, y_train = load_uci_har_split("train")
+    X_test, y_test = load_uci_har_split("test")
     return X_train, X_test, y_train, y_test
 
 
@@ -108,6 +143,24 @@ def save_artifact(artifact):
             pickle.dump(artifact, f)
 
 
+def build_activity_presets(X_train, y_train, model, X_train_scaled):
+    """Pick one high-confidence compact feature row for each manual simulator preset."""
+    probabilities = model.predict_proba(X_train_scaled)
+    presets = {}
+
+    for label, activity in enumerate(ACTIVITIES):
+        class_indices = np.flatnonzero(y_train == label)
+        best_index = class_indices[np.argmax(probabilities[class_indices, label])]
+        row = X_train[int(best_index)]
+        features = {name: float(value) for name, value in zip(FEATURE_NAMES, row)}
+        presets[activity] = {
+            "inputs": {key: features[key] for key in ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z")},
+            "features": features,
+        }
+
+    return presets
+
+
 def train_and_save():
     print("Loading actual UCI HAR raw inertial signal dataset...")
     X_train, X_test, y_train, y_test = load_uci_har_data()
@@ -116,7 +169,7 @@ def train_and_save():
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    print(f"Training Random Forest model with {N_ESTIMATORS} trees on full 561-feature windows...")
+    print(f"Training Random Forest model with {N_ESTIMATORS} trees on {len(FEATURE_NAMES)} live features...")
     model = RandomForestClassifier(
         n_estimators=N_ESTIMATORS,
         max_depth=28,
@@ -138,12 +191,13 @@ def train_and_save():
         "scaler": scaler,
         "accuracy": acc,
         "activities": ACTIVITIES,
-        "feature_names": get_feature_names(),
+        "feature_names": FEATURE_NAMES,
         "dataset": "UCI HAR Dataset",
         "training_source": "actual UCI HAR raw inertial signal windows",
-        "feature_pipeline": "shared 561-feature rolling-window extractor",
+        "feature_pipeline": "compact live sensor features",
         "sample_rate_hz": SAMPLE_RATE_HZ,
         "n_estimators": N_ESTIMATORS,
+        "activity_preset_features": build_activity_presets(X_train, y_train, model, X_train_scaled),
     }
 
     save_artifact(artifact)

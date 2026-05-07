@@ -12,8 +12,6 @@ import time
 import warnings
 import streamlit.components.v1 as components
 
-from har_features import BASE_AXES, FEATURE_COUNT, WINDOW_SIZE, extract_window_features, window_from_motion
-
 warnings.filterwarnings(
     "ignore",
     message="`sklearn.utils.parallel.delayed` should be used with `sklearn.utils.parallel.Parallel`.*",
@@ -290,6 +288,7 @@ LIVE_REFRESH_COMPONENT = components.declare_component(
 BASE_DIR = os.path.dirname(__file__)
 PHONE_BRIDGE_PATH = os.path.join(BASE_DIR, "phone_motion_latest.json")
 PHONE_BRIDGE_PORT = 8765
+FEATURE_COUNT = 18
 
 FALL_LEVELS = {
     "Normal": {"color": "#34d399", "icon": "✅"},
@@ -337,16 +336,68 @@ model_accuracy = artifact["accuracy"]
 model_dataset = artifact.get("dataset", "UCI HAR Dataset")
 model_feature_names = artifact.get("feature_names", [])
 model_training_source = artifact.get("training_source", "actual UCI HAR dataset")
+activity_preset_features = artifact.get("activity_preset_features", {})
 
 if hasattr(model, "n_jobs"):
     model.n_jobs = 1
 
 # ── Feature engineering ───────────────────────────────────────────────────────
 def build_features(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion=None):
-    """Build the full 561-feature vector used by the UCI HAR-trained model."""
-    fallback_values = (acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z)
-    window = window_from_motion(motion or {}, fallback_values)
-    features = extract_window_features(window)
+    """Build the compact live-feature vector used by the UCI HAR-trained model."""
+    acc_mag = np.sqrt(acc_x**2 + acc_y**2 + acc_z**2)
+    gyro_mag = np.sqrt(gyro_x**2 + gyro_y**2 + gyro_z**2)
+
+    if motion:
+        acc_x_std = safe_float(motion.get("acc_x_std"), 0)
+        acc_y_std = safe_float(motion.get("acc_y_std"), 0)
+        acc_z_std = safe_float(motion.get("acc_z_std"), 0)
+        gyro_x_std = safe_float(motion.get("gyro_x_std"), 0)
+        gyro_y_std = safe_float(motion.get("gyro_y_std"), 0)
+        gyro_z_std = safe_float(motion.get("gyro_z_std"), 0)
+        acc_rms = safe_float(motion.get("acc_rms_g"), acc_mag)
+        gyro_rms = safe_float(motion.get("gyro_rms"), gyro_mag)
+        peak_body = safe_float(motion.get("peak_body_g"), acc_mag)
+        peak_total = safe_float(motion.get("peak_total_g"), acc_mag)
+        peak_jerk = safe_float(motion.get("peak_jerk_gs"), 0)
+        stillness = safe_float(motion.get("stillness_score"), 0)
+    else:
+        dynamic_scale = 0.18 if acc_mag > 0.15 or gyro_mag > 0.08 else 0.03
+        acc_x_std = abs(acc_x) * dynamic_scale
+        acc_y_std = abs(acc_y) * dynamic_scale
+        acc_z_std = abs(acc_z) * dynamic_scale
+        gyro_x_std = abs(gyro_x) * dynamic_scale
+        gyro_y_std = abs(gyro_y) * dynamic_scale
+        gyro_z_std = abs(gyro_z) * dynamic_scale
+        acc_rms = acc_mag
+        gyro_rms = gyro_mag
+        peak_body = acc_mag
+        peak_total = np.sqrt(acc_x**2 + acc_y**2 + (acc_z + 1.0) ** 2)
+        peak_jerk = 0.0
+        stillness = 1.0 if acc_mag < 0.14 and gyro_mag < 0.18 else 0.0
+
+    features = np.array(
+        [
+            acc_x,
+            acc_y,
+            acc_z,
+            gyro_x,
+            gyro_y,
+            gyro_z,
+            acc_x_std,
+            acc_y_std,
+            acc_z_std,
+            gyro_x_std,
+            gyro_y_std,
+            gyro_z_std,
+            acc_rms,
+            gyro_rms,
+            peak_body,
+            peak_total,
+            peak_jerk,
+            clamp(stillness, 0, 1),
+        ],
+        dtype=float,
+    )
     return features.reshape(1, -1)
 
 
@@ -363,7 +414,7 @@ def predict_activity(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion=None):
 
 def get_cached_live_prediction(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion):
     """
-    Avoid re-running the 561-feature extractor and 500-tree forest on every page tick.
+    Avoid re-running feature extraction and the 500-tree forest on every page tick.
     Live sensors can post several updates per second, but human activity labels do not
     need sub-second inference to feel responsive.
     """
@@ -408,8 +459,25 @@ def render_motion_metrics(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z):
 def apply_manual_preset(activity):
     """Push a preset into the manual simulator slider widget state."""
     st.session_state["last_preset"] = activity
-    for key, value in ACTIVITY_PRESETS[activity].items():
+    preset_inputs = get_manual_preset_inputs(activity)
+    for key, value in preset_inputs.items():
         st.session_state[key] = float(value)
+
+
+def get_manual_preset_inputs(activity):
+    preset = activity_preset_features.get(activity, {})
+    inputs = preset.get("inputs") if isinstance(preset, dict) else None
+    if isinstance(inputs, dict):
+        return {key: float(inputs.get(key, ACTIVITY_PRESETS[activity][key])) for key in ACTIVITY_PRESETS[activity]}
+    return ACTIVITY_PRESETS[activity]
+
+
+def get_manual_preset_motion(activity):
+    preset = activity_preset_features.get(activity, {})
+    features = preset.get("features") if isinstance(preset, dict) else None
+    if not isinstance(features, dict):
+        return None
+    return {key: float(features.get(key, 0.0)) for key in model_feature_names}
 
 
 def safe_float(value, default=0.0):
@@ -423,15 +491,6 @@ def safe_float(value, default=0.0):
 
 def clamp(value, lower, upper):
     return max(lower, min(upper, value))
-
-
-def normalize_axis_window(values):
-    if not isinstance(values, list):
-        return []
-    clean = []
-    for value in values[-WINDOW_SIZE:]:
-        clean.append(safe_float(value, 0.0))
-    return clean
 
 
 def get_lan_ip():
@@ -450,11 +509,6 @@ def get_lan_ip():
 def normalize_live_payload(payload):
     """Convert the browser motion payload into model-ready sensor values."""
     payload = payload or {}
-    raw_window = payload.get("window")
-    window = {}
-    if isinstance(raw_window, dict):
-        window = {axis: normalize_axis_window(raw_window.get(axis)) for axis in BASE_AXES}
-
     return {
         "running": bool(payload.get("running", False)),
         "error": payload.get("error"),
@@ -481,7 +535,6 @@ def normalize_live_payload(payload):
         "seconds_since_impact": payload.get("seconds_since_impact"),
         "received_at": payload.get("received_at"),
         "source": payload.get("source", "streamlit_component"),
-        "window": window,
     }
 
 
@@ -627,7 +680,7 @@ with st.sidebar:
     <div style="font-size:0.75rem; color:#4a5580; margin-top:1rem; line-height:1.6">
         <b style="color:#6b7db3">Dataset:</b> Actual UCI HAR<br>
         <b style="color:#6b7db3">Model:</b> Random Forest ({artifact.get("n_estimators", "many")} trees)<br>
-        <b style="color:#6b7db3">Features:</b> {len(model_feature_names) or FEATURE_COUNT} rolling-window features<br>
+        <b style="color:#6b7db3">Features:</b> {len(model_feature_names) or FEATURE_COUNT} live sensor features<br>
         <b style="color:#6b7db3">Classes:</b> 6 activities<br>
         <b style="color:#6b7db3">Sensor:</b> Smartphone IMU<br>
         <b style="color:#6b7db3">Safety Layer:</b> Impact + jerk + stillness
@@ -662,14 +715,10 @@ left_col, right_col = st.columns([1, 1], gap="large")
 with left_col:
     st.markdown('<div class="section-header">📡 Sensor Inputs</div>', unsafe_allow_html=True)
     
-    # Apply preset if selected
-    default = ACTIVITY_PRESETS.get(
-        selected_preset or st.session_state.get("last_preset", "Walking"),
-        ACTIVITY_PRESETS["Walking"]
-    )
-
     is_live_mode = input_mode == "Live Phone Sensor"
     live_motion = None
+    manual_motion = None
+    manual_preset_activity = selected_preset or st.session_state.get("last_preset", "Walking")
 
     if is_live_mode:
         LIVE_REFRESH_COMPONENT(key="live_refresh", default=0)
@@ -713,6 +762,7 @@ with left_col:
         </div>
         """, unsafe_allow_html=True)
     else:
+        default = get_manual_preset_inputs(manual_preset_activity)
         st.markdown("**Body Acceleration** `(g-force, body component)`")
         acc_x = st.slider("X-axis (forward/backward)", -1.0, 1.0, float(default["acc_x"]), 0.01, key="acc_x",
                           help="Forward-backward body acceleration (gravity removed)")
@@ -731,6 +781,18 @@ with left_col:
                            help="Yaw angular velocity")
         render_motion_metrics(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z)
 
+        current_inputs = {
+            "acc_x": acc_x,
+            "acc_y": acc_y,
+            "acc_z": acc_z,
+            "gyro_x": gyro_x,
+            "gyro_y": gyro_y,
+            "gyro_z": gyro_z,
+        }
+        preset_is_unchanged = all(abs(current_inputs[key] - default[key]) <= 0.006 for key in current_inputs)
+        if preset_is_unchanged:
+            manual_motion = get_manual_preset_motion(manual_preset_activity)
+
 
 with right_col:
     st.markdown('<div class="section-header">🎯 Prediction</div>', unsafe_allow_html=True)
@@ -747,7 +809,7 @@ with right_col:
             live_motion,
         )
     else:
-        predicted, probs = predict_activity(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, None)
+        predicted, probs = predict_activity(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, manual_motion)
     confidence = max(probs) * 100
     icon = ACTIVITY_ICONS[predicted]
     color = ACTIVITY_COLORS[predicted]
