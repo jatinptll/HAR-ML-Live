@@ -415,14 +415,14 @@ def predict_activity(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion=None):
 def get_cached_live_prediction(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion):
     """
     Avoid re-running feature extraction and the 500-tree forest on every page tick.
-    Live sensors can post several updates per second, but human activity labels do not
-    need sub-second inference to feel responsive.
+    The compact model is fast enough for a near-live dashboard, so this only
+    prevents duplicate work inside very tight browser refresh bursts.
     """
     now = time.time()
     last_at = st.session_state.get("last_live_prediction_at", 0.0)
     cached = st.session_state.get("last_live_prediction")
 
-    if cached and now - last_at < 1.6:
+    if cached and now - last_at < 0.25:
         return cached
 
     predicted, probs = predict_activity(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion)
