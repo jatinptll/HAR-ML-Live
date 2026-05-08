@@ -344,6 +344,12 @@ if hasattr(model, "n_jobs"):
 # ── Feature engineering ───────────────────────────────────────────────────────
 def build_features(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion=None):
     """Build the compact live-feature vector used by the UCI HAR-trained model."""
+    if motion and motion.get("manual_preset_features"):
+        return np.array(
+            [[safe_float(motion.get(name), 0.0) for name in model_feature_names]],
+            dtype=float,
+        )
+
     acc_mag = np.sqrt(acc_x**2 + acc_y**2 + acc_z**2)
     gyro_mag = np.sqrt(gyro_x**2 + gyro_y**2 + gyro_z**2)
 
@@ -407,9 +413,48 @@ def predict_activity(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion=None):
     features_scaled = scaler.transform(features)
 
     probs = model.predict_proba(features_scaled)[0]
+    probs = calibrate_live_probabilities(probs, motion)
     pred_idx = int(np.argmax(probs))
     
     return ACTIVITIES[pred_idx], probs
+
+
+def calibrate_live_probabilities(probs, motion):
+    """Apply motion-state sanity checks without changing the trained model."""
+    if not motion or motion.get("manual_preset_features"):
+        return probs
+
+    calibrated = np.asarray(probs, dtype=float).copy()
+    acc_rms = safe_float(motion.get("acc_rms_g"), 0)
+    gyro_rms = safe_float(motion.get("gyro_rms"), 0)
+    peak_body = safe_float(motion.get("peak_body_g"), 0)
+    peak_jerk = safe_float(motion.get("peak_jerk_gs"), 0)
+    stillness = safe_float(motion.get("stillness_score"), 0)
+
+    clearly_dynamic = (
+        stillness < 0.62
+        and (acc_rms >= 0.08 or gyro_rms >= 0.10 or peak_body >= 0.16 or peak_jerk >= 1.2)
+    )
+
+    if clearly_dynamic:
+        for static_activity in ("Sitting", "Standing", "Laying"):
+            calibrated[ACTIVITIES.index(static_activity)] *= 0.04
+
+        walking_i = ACTIVITIES.index("Walking")
+        upstairs_i = ACTIVITIES.index("Walking Upstairs")
+        downstairs_i = ACTIVITIES.index("Walking Downstairs")
+        calibrated[walking_i] += 0.24
+        calibrated[upstairs_i] += 0.16
+        calibrated[downstairs_i] += 0.14
+        best_locomotion = max(calibrated[walking_i], calibrated[upstairs_i], calibrated[downstairs_i])
+
+        if best_locomotion > 0 and calibrated[walking_i] >= best_locomotion * 0.52:
+            calibrated[walking_i] *= 1.35
+            calibrated[upstairs_i] *= 0.92
+            calibrated[downstairs_i] *= 0.92
+
+    total = calibrated.sum()
+    return calibrated / total if total > 0 else probs
 
 
 def get_cached_live_prediction(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion):
@@ -422,7 +467,7 @@ def get_cached_live_prediction(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, moti
     last_at = st.session_state.get("last_live_prediction_at", 0.0)
     cached = st.session_state.get("last_live_prediction")
 
-    if cached and now - last_at < 0.25:
+    if cached and now - last_at < 0.4:
         return cached
 
     predicted, probs = predict_activity(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, motion)
@@ -465,10 +510,6 @@ def apply_manual_preset(activity):
 
 
 def get_manual_preset_inputs(activity):
-    preset = activity_preset_features.get(activity, {})
-    inputs = preset.get("inputs") if isinstance(preset, dict) else None
-    if isinstance(inputs, dict):
-        return {key: float(inputs.get(key, ACTIVITY_PRESETS[activity][key])) for key in ACTIVITY_PRESETS[activity]}
     return ACTIVITY_PRESETS[activity]
 
 
@@ -477,7 +518,10 @@ def get_manual_preset_motion(activity):
     features = preset.get("features") if isinstance(preset, dict) else None
     if not isinstance(features, dict):
         return None
-    return {key: float(features.get(key, 0.0)) for key in model_feature_names}
+    return {
+        **{key: float(features.get(key, 0.0)) for key in model_feature_names},
+        "manual_preset_features": True,
+    }
 
 
 def safe_float(value, default=0.0):
